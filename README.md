@@ -16,6 +16,13 @@ standalone tool with no dependencies is enough.
 $ fontmetrics /System/Library/Fonts/Helvetica.ttc
 ```
 
+`.ttc` files bundle several fonts behind one `ttcf` header; by default the
+tool reads the first one. Pass `--index` (or `-i`) to pick another:
+
+```
+$ fontmetrics --index 1 /System/Library/Fonts/Helvetica.ttc
+```
+
 ```
 units per em:     1000
 hhea ascender:    952
@@ -78,9 +85,6 @@ win descent:      200
 
 ## Limitations (for now)
 
-- Font collections (`.ttc`) are not parsed as collections; only the first
-  font's table directory format is handled, and only if it happens to sit
-  at the start of the file.
 - CFF-flavored OpenType fonts (`OTTO`) report metrics fine since `head`,
   `hhea`, and `OS/2` are the same either way, but nothing CFF-specific
   (like glyph outlines) is read.

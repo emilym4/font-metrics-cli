@@ -9,11 +9,40 @@ use sfnt::ParseError;
 use tables::{HeadTable, HheaTable, Os2Table};
 
 fn main() -> ExitCode {
+    let mut path = None;
+    let mut font_index = 0usize;
+
     let mut args = env::args().skip(1);
-    let path = match args.next() {
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--index" | "-i" => {
+                let value = match args.next() {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("fontmetrics: --index needs a number");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                font_index = match value.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("fontmetrics: --index must be a non-negative integer, got '{value}'");
+                        return ExitCode::FAILURE;
+                    }
+                };
+            }
+            _ if path.is_none() => path = Some(arg),
+            _ => {
+                eprintln!("usage: fontmetrics [--index N] <font-file>");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: fontmetrics <font-file>");
+            eprintln!("usage: fontmetrics [--index N] <font-file>");
             return ExitCode::FAILURE;
         }
     };
@@ -26,7 +55,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match build_report(&data) {
+    match build_report(&data, font_index) {
         Ok(report) => {
             print!("{report}");
             ExitCode::SUCCESS
@@ -40,9 +69,10 @@ fn main() -> ExitCode {
 
 /// Parses the font bytes and renders a human-readable metrics report. Kept
 /// separate from `main` so it can be exercised directly with in-memory
-/// bytes instead of files on disk.
-fn build_report(data: &[u8]) -> Result<String, ParseError> {
-    let directory = sfnt::parse_table_directory(data)?;
+/// bytes instead of files on disk. `font_index` selects which font to read
+/// out of a `.ttc` collection; plain single-font files only accept 0.
+fn build_report(data: &[u8], font_index: usize) -> Result<String, ParseError> {
+    let directory = sfnt::parse_font(data, font_index)?;
 
     let head_record = sfnt::find_table(&directory, b"head").ok_or(ParseError::MissingTable("head"))?;
     let head = tables::parse_head(sfnt::table_bytes(data, &head_record)?)?;
@@ -145,7 +175,7 @@ mod tests {
     #[test]
     fn reports_metrics_from_a_minimal_font_without_os2() {
         let data = minimal_font();
-        let report = build_report(&data).unwrap();
+        let report = build_report(&data, 0).unwrap();
 
         assert!(report.contains("units per em:     1000"));
         assert!(report.contains("hhea ascender:    800"));
@@ -159,7 +189,7 @@ mod tests {
         set_u32(&mut data, 0, 0x0001_0000);
         set_u16(&mut data, 4, 0);
 
-        assert_eq!(build_report(&data), Err(ParseError::MissingTable("head")));
+        assert_eq!(build_report(&data, 0), Err(ParseError::MissingTable("head")));
     }
 
     /// Builds a font like `minimal_font`, but with an extra, legacy-shaped
@@ -192,12 +222,68 @@ mod tests {
     #[test]
     fn falls_back_to_hhea_for_a_legacy_os2_version_0_table() {
         let data = font_with_legacy_os2();
-        let report = build_report(&data).unwrap();
+        let report = build_report(&data, 0).unwrap();
 
         assert!(report.contains("typo ascender:    800"));
         assert!(report.contains("typo descender:   -200"));
         assert!(report.contains("win ascent:       800"));
         assert!(report.contains("win descent:      200"));
         assert!(report.contains("hhea: this font's OS/2 table is the old version 0 layout"));
+    }
+
+    /// Shifts every table record's offset in a standalone font's bytes by
+    /// `delta`, so it can be embedded at a non-zero position inside a `.ttc`
+    /// without its table offsets (which are absolute, not relative to the
+    /// font's own directory) going stale.
+    fn relocate_font(data: &[u8], delta: u32) -> Vec<u8> {
+        let mut data = data.to_vec();
+        let num_tables = u16::from_be_bytes([data[4], data[5]]) as usize;
+        for i in 0..num_tables {
+            let base = 12 + i * 16;
+            let current = u32::from_be_bytes(data[base + 8..base + 12].try_into().unwrap());
+            set_u32(&mut data, base + 8, current + delta);
+        }
+        data
+    }
+
+    /// Builds a two-font `.ttc`: index 0 is `minimal_font` (no OS/2), index
+    /// 1 is `font_with_legacy_os2`, so a test can tell which one got read.
+    fn collection_with_two_fonts() -> Vec<u8> {
+        let header_len = 12 + 2 * 4;
+        let font_a = relocate_font(&minimal_font(), header_len as u32);
+        let font_b_offset = header_len as u32 + font_a.len() as u32;
+        let font_b = relocate_font(&font_with_legacy_os2(), font_b_offset);
+
+        let mut data = vec![0u8; header_len + font_a.len() + font_b.len()];
+        data[0..4].copy_from_slice(b"ttcf");
+        set_u16(&mut data, 4, 1); // majorVersion
+        set_u16(&mut data, 6, 0); // minorVersion
+        set_u32(&mut data, 8, 2); // numFonts
+        set_u32(&mut data, 12, header_len as u32);
+        set_u32(&mut data, 16, font_b_offset);
+        data[header_len..header_len + font_a.len()].copy_from_slice(&font_a);
+        data[font_b_offset as usize..font_b_offset as usize + font_b.len()].copy_from_slice(&font_b);
+
+        data
+    }
+
+    #[test]
+    fn reads_metrics_for_a_chosen_font_inside_a_collection() {
+        let data = collection_with_two_fonts();
+
+        let report0 = build_report(&data, 0).unwrap();
+        assert!(report0.contains("OS/2 table:       not present"));
+
+        let report1 = build_report(&data, 1).unwrap();
+        assert!(report1.contains("typo ascender:    800"));
+    }
+
+    #[test]
+    fn fails_with_a_clear_error_for_a_collection_index_out_of_range() {
+        let data = collection_with_two_fonts();
+        assert_eq!(
+            build_report(&data, 2),
+            Err(ParseError::FontIndexOutOfRange { index: 2, count: 2 })
+        );
     }
 }

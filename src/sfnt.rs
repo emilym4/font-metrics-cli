@@ -30,6 +30,7 @@ pub enum ParseError {
         needed: usize,
         have: usize,
     },
+    FontIndexOutOfRange { index: usize, count: usize },
 }
 
 impl fmt::Display for ParseError {
@@ -44,26 +45,75 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedTableLength { table, needed, have } => {
                 write!(f, "table '{table}' too short: needed {needed} bytes, found {have}")
             }
+            ParseError::FontIndexOutOfRange { index, count } => {
+                write!(f, "font index {index} out of range: file contains {count} font(s)")
+            }
         }
     }
 }
 
 impl std::error::Error for ParseError {}
 
-/// Reads the sfnt header and table directory. Does not validate the
-/// contents of any individual table.
-pub fn parse_table_directory(data: &[u8]) -> Result<TableDirectory, ParseError> {
+/// Tag of a TrueType/OpenType font collection header ("ttcf"), read as a
+/// big-endian u32 the same way the sfnt version tag is.
+const TTC_TAG: u32 = 0x7474_6366;
+
+/// Locates the sfnt table directory for `font_index` within `data`.
+///
+/// Most font files hold a single font and this is just `font_index == 0`
+/// pointing at the start of the file. A `.ttc` collection instead starts
+/// with a `ttcf` header followed by one directory offset per font, so this
+/// looks at the leading tag to tell the two cases apart.
+pub fn parse_font(data: &[u8], font_index: usize) -> Result<TableDirectory, ParseError> {
+    require_len(data, 4)?;
+
+    if read_u32(data, 0) == TTC_TAG {
+        let offset = ttc_font_offset(data, font_index)?;
+        parse_table_directory_at(data, offset as usize)
+    } else if font_index == 0 {
+        parse_table_directory_at(data, 0)
+    } else {
+        Err(ParseError::FontIndexOutOfRange { index: font_index, count: 1 })
+    }
+}
+
+/// Reads offset `font_index` out of a `ttcf` header's OffsetTable.
+fn ttc_font_offset(data: &[u8], font_index: usize) -> Result<u32, ParseError> {
+    // tag (4) + majorVersion (2) + minorVersion (2) + numFonts (4)
     require_len(data, 12)?;
+    let num_fonts = read_u32(data, 8) as usize;
 
-    let sfnt_version = read_u32(data, 0);
-    let num_tables = read_u16(data, 4) as usize;
+    if font_index >= num_fonts {
+        return Err(ParseError::FontIndexOutOfRange { index: font_index, count: num_fonts });
+    }
 
-    let header_len = 12 + num_tables * 16;
+    let entry = 12 + font_index * 4;
+    require_len(data, entry + 4)?;
+    Ok(read_u32(data, entry))
+}
+
+/// Reads the sfnt header and table directory starting at the very front of
+/// `data`. Does not validate the contents of any individual table.
+pub fn parse_table_directory(data: &[u8]) -> Result<TableDirectory, ParseError> {
+    parse_table_directory_at(data, 0)
+}
+
+/// Reads an sfnt header and table directory starting at `offset` into
+/// `data`, so a single font's directory can be pulled out of a `.ttc`
+/// collection instead of assuming it starts at byte 0.
+pub fn parse_table_directory_at(data: &[u8], offset: usize) -> Result<TableDirectory, ParseError> {
+    let header_end = offset.saturating_add(12);
+    require_len(data, header_end)?;
+
+    let sfnt_version = read_u32(data, offset);
+    let num_tables = read_u16(data, offset + 4) as usize;
+
+    let header_len = offset + 12 + num_tables * 16;
     require_len(data, header_len)?;
 
     let mut records = Vec::with_capacity(num_tables);
     for i in 0..num_tables {
-        let base = 12 + i * 16;
+        let base = offset + 12 + i * 16;
         let mut tag = [0u8; 4];
         tag.copy_from_slice(&data[base..base + 4]);
         records.push(TableRecord {
@@ -181,5 +231,73 @@ mod tests {
         let record = find_table(&directory, b"head").unwrap();
 
         assert!(table_bytes(&data, &record).is_err());
+    }
+
+    /// Builds a `.ttc` with two fonts, each just a bare table directory (no
+    /// table data) so the two directories can be told apart by their sfnt
+    /// version and number of tables.
+    fn sample_collection_with_two_fonts() -> Vec<u8> {
+        let header_len = 12 + 2 * 4; // ttcf tag + version + numFonts + 2 offsets
+        let font_a_offset = header_len;
+        let font_a_len = 12 + 1 * 16;
+        let font_b_offset = font_a_offset + font_a_len;
+        let font_b_len = 12 + 2 * 16;
+
+        let mut data = vec![0u8; font_b_offset + font_b_len];
+        data[0..4].copy_from_slice(b"ttcf");
+        set_u16(&mut data, 4, 1); // majorVersion
+        set_u16(&mut data, 6, 0); // minorVersion
+        set_u32(&mut data, 8, 2); // numFonts
+        set_u32(&mut data, 12, font_a_offset as u32);
+        set_u32(&mut data, 16, font_b_offset as u32);
+
+        set_u32(&mut data, font_a_offset, 0x0001_0000);
+        set_u16(&mut data, font_a_offset + 4, 1);
+        data[font_a_offset + 12..font_a_offset + 16].copy_from_slice(b"head");
+
+        set_u32(&mut data, font_b_offset, 0x4f54_544f); // "OTTO"
+        set_u16(&mut data, font_b_offset + 4, 2);
+        data[font_b_offset + 12..font_b_offset + 16].copy_from_slice(b"CFF ");
+        data[font_b_offset + 28..font_b_offset + 32].copy_from_slice(b"head");
+
+        data
+    }
+
+    #[test]
+    fn parses_each_font_directory_out_of_a_collection() {
+        let data = sample_collection_with_two_fonts();
+
+        let font_a = parse_font(&data, 0).unwrap();
+        assert_eq!(font_a.sfnt_version, 0x0001_0000);
+        assert_eq!(font_a.records.len(), 1);
+
+        let font_b = parse_font(&data, 1).unwrap();
+        assert_eq!(font_b.sfnt_version, 0x4f54_544f);
+        assert_eq!(font_b.records.len(), 2);
+    }
+
+    #[test]
+    fn rejects_a_collection_font_index_past_num_fonts() {
+        let data = sample_collection_with_two_fonts();
+        assert_eq!(
+            parse_font(&data, 2),
+            Err(ParseError::FontIndexOutOfRange { index: 2, count: 2 })
+        );
+    }
+
+    #[test]
+    fn rejects_a_nonzero_font_index_for_a_plain_non_collection_font() {
+        let data = sample_font_with_one_table();
+        assert_eq!(
+            parse_font(&data, 1),
+            Err(ParseError::FontIndexOutOfRange { index: 1, count: 1 })
+        );
+    }
+
+    #[test]
+    fn parses_font_index_zero_for_a_plain_non_collection_font() {
+        let data = sample_font_with_one_table();
+        let directory = parse_font(&data, 0).unwrap();
+        assert_eq!(directory.sfnt_version, 0x0001_0000);
     }
 }
