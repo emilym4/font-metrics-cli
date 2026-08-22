@@ -68,11 +68,23 @@ fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>) -> 
 
     match os2 {
         Some(os2) => {
-            out.push_str(&format!("typo ascender:    {}\n", os2.typo_ascender));
-            out.push_str(&format!("typo descender:   {}\n", os2.typo_descender));
-            out.push_str(&format!("typo line gap:    {}\n", os2.typo_line_gap));
-            out.push_str(&format!("win ascent:       {}\n", os2.win_ascent));
-            out.push_str(&format!("win descent:      {}\n", os2.win_descent));
+            // Very old OS/2 version 0 tables (68 bytes, predating
+            // usWinAscent/usWinDescent) leave these fields unset. Fall back
+            // to the hhea numbers, which cover the same ground.
+            let typo_ascender = os2.typo_ascender.unwrap_or(hhea.ascender);
+            let typo_descender = os2.typo_descender.unwrap_or(hhea.descender);
+            let typo_line_gap = os2.typo_line_gap.unwrap_or(hhea.line_gap);
+            let win_ascent = os2.win_ascent.unwrap_or_else(|| hhea.ascender.max(0) as u16);
+            let win_descent = os2.win_descent.unwrap_or_else(|| hhea.descender.unsigned_abs());
+
+            out.push_str(&format!("typo ascender:    {typo_ascender}\n"));
+            out.push_str(&format!("typo descender:   {typo_descender}\n"));
+            out.push_str(&format!("typo line gap:    {typo_line_gap}\n"));
+            out.push_str(&format!("win ascent:       {win_ascent}\n"));
+            out.push_str(&format!("win descent:      {win_descent}\n"));
+            if os2.typo_ascender.is_none() {
+                out.push_str("  (typo/win fields above are from hhea: this font's OS/2 table is the old version 0 layout without them)\n");
+            }
             if let (Some(cap), Some(x)) = (os2.cap_height, os2.x_height) {
                 out.push_str(&format!("cap height:       {cap}\n"));
                 out.push_str(&format!("x-height:         {x}\n"));
@@ -148,5 +160,44 @@ mod tests {
         set_u16(&mut data, 4, 0);
 
         assert_eq!(build_report(&data), Err(ParseError::MissingTable("head")));
+    }
+
+    /// Builds a font like `minimal_font`, but with an extra, legacy-shaped
+    /// (68-byte) OS/2 version 0 table that has no typo or win metrics.
+    fn font_with_legacy_os2() -> Vec<u8> {
+        let head_len = 46;
+        let hhea_len = 36;
+        let os2_len = 68;
+        let head_offset = 12 + 3 * 16;
+        let hhea_offset = head_offset + head_len;
+        let os2_offset = hhea_offset + hhea_len;
+
+        let mut data = vec![0u8; os2_offset + os2_len];
+        set_u32(&mut data, 0, 0x0001_0000);
+        set_u16(&mut data, 4, 3);
+
+        write_table_record(&mut data, 0, b"head", head_offset as u32, head_len as u32);
+        write_table_record(&mut data, 1, b"hhea", hhea_offset as u32, hhea_len as u32);
+        write_table_record(&mut data, 2, b"OS/2", os2_offset as u32, os2_len as u32);
+
+        set_u16(&mut data, head_offset + 18, 1000); // unitsPerEm
+        set_i16(&mut data, hhea_offset + 4, 800); // ascender
+        set_i16(&mut data, hhea_offset + 6, -200); // descender
+        set_i16(&mut data, hhea_offset + 8, 0); // lineGap
+        set_u16(&mut data, os2_offset, 0); // OS/2 version
+
+        data
+    }
+
+    #[test]
+    fn falls_back_to_hhea_for_a_legacy_os2_version_0_table() {
+        let data = font_with_legacy_os2();
+        let report = build_report(&data).unwrap();
+
+        assert!(report.contains("typo ascender:    800"));
+        assert!(report.contains("typo descender:   -200"));
+        assert!(report.contains("win ascent:       800"));
+        assert!(report.contains("win descent:      200"));
+        assert!(report.contains("hhea: this font's OS/2 table is the old version 0 layout"));
     }
 }

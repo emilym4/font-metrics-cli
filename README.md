@@ -62,13 +62,25 @@ Standard library only, no external crates:
 cargo build --release
 ```
 
+Some very old fonts have an `OS/2` table in the original TrueType 1.0 layout,
+which stops 10 bytes short of `sTypoAscender` and never got
+`usWinAscent`/`usWinDescent` at all. When that happens, the tool falls back
+to the `hhea` numbers for those fields and says so:
+
+```
+typo ascender:    800
+typo descender:   -200
+typo line gap:    0
+win ascent:       800
+win descent:      200
+  (typo/win fields above are from hhea: this font's OS/2 table is the old version 0 layout without them)
+```
+
 ## Limitations (for now)
 
 - Font collections (`.ttc`) are not parsed as collections; only the first
   font's table directory format is handled, and only if it happens to sit
   at the start of the file.
-- No support for the `OS/2` version 0/1 fallback rules used by very old
-  fonts that predate `usWinAscent`/`usWinDescent`.
 - CFF-flavored OpenType fonts (`OTTO`) report metrics fine since `head`,
   `hhea`, and `OS/2` are the same either way, but nothing CFF-specific
   (like glyph outlines) is read.

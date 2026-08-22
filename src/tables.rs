@@ -48,11 +48,16 @@ pub fn parse_hhea(data: &[u8]) -> Result<HheaTable, ParseError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Os2Table {
     pub version: u16,
-    pub typo_ascender: i16,
-    pub typo_descender: i16,
-    pub typo_line_gap: i16,
-    pub win_ascent: u16,
-    pub win_descent: u16,
+    // The original OS/2 version 0 table, as written by TrueType 1.0 era
+    // tools, stops at usLastCharIndex (68 bytes) and never got the typo
+    // and win metrics added afterward. Fonts that old exist in the wild,
+    // so these are None rather than a parse error; callers fall back to
+    // hhea for them.
+    pub typo_ascender: Option<i16>,
+    pub typo_descender: Option<i16>,
+    pub typo_line_gap: Option<i16>,
+    pub win_ascent: Option<u16>,
+    pub win_descent: Option<u16>,
     // sxHeight / sCapHeight were only added in OS/2 version 2, so older
     // fonts (or fonts that just don't declare them) leave these unset.
     pub x_height: Option<i16>,
@@ -60,12 +65,28 @@ pub struct Os2Table {
 }
 
 pub fn parse_os2(data: &[u8]) -> Result<Os2Table, ParseError> {
-    const MIN_LEN: usize = 78;
+    // 68 bytes covers every OS/2 version ever shipped, including the
+    // truncated version 0 tables that predate usWinAscent/usWinDescent.
+    const MIN_LEN: usize = 68;
     if data.len() < MIN_LEN {
         return Err(ParseError::UnexpectedTableLength { table: "OS/2", needed: MIN_LEN, have: data.len() });
     }
 
     let version = read_u16(data, 0);
+
+    const TYPO_AND_WIN_MIN_LEN: usize = 78;
+    let (typo_ascender, typo_descender, typo_line_gap, win_ascent, win_descent) =
+        if data.len() >= TYPO_AND_WIN_MIN_LEN {
+            (
+                Some(read_i16(data, 68)),
+                Some(read_i16(data, 70)),
+                Some(read_i16(data, 72)),
+                Some(read_u16(data, 74)),
+                Some(read_u16(data, 76)),
+            )
+        } else {
+            (None, None, None, None, None)
+        };
 
     const V2_MIN_LEN: usize = 96;
     let (x_height, cap_height) = if version >= 2 && data.len() >= V2_MIN_LEN {
@@ -76,11 +97,11 @@ pub fn parse_os2(data: &[u8]) -> Result<Os2Table, ParseError> {
 
     Ok(Os2Table {
         version,
-        typo_ascender: read_i16(data, 68),
-        typo_descender: read_i16(data, 70),
-        typo_line_gap: read_i16(data, 72),
-        win_ascent: read_u16(data, 74),
-        win_descent: read_u16(data, 76),
+        typo_ascender,
+        typo_descender,
+        typo_line_gap,
+        win_ascent,
+        win_descent,
         x_height,
         cap_height,
     })
@@ -144,9 +165,9 @@ mod tests {
 
         let os2 = parse_os2(&data).unwrap();
         assert_eq!(os2.version, 2);
-        assert_eq!(os2.typo_ascender, 1000);
-        assert_eq!(os2.typo_descender, -200);
-        assert_eq!(os2.win_ascent, 1024);
+        assert_eq!(os2.typo_ascender, Some(1000));
+        assert_eq!(os2.typo_descender, Some(-200));
+        assert_eq!(os2.win_ascent, Some(1024));
         assert_eq!(os2.x_height, Some(500));
         assert_eq!(os2.cap_height, Some(700));
     }
@@ -159,7 +180,30 @@ mod tests {
 
         let os2 = parse_os2(&data).unwrap();
         assert_eq!(os2.version, 0);
+        assert_eq!(os2.typo_ascender, Some(800));
         assert_eq!(os2.x_height, None);
         assert_eq!(os2.cap_height, None);
+    }
+
+    #[test]
+    fn leaves_typo_and_win_metrics_unset_for_a_legacy_68_byte_os2_v0_table() {
+        // The TrueType 1.0 era OS/2 layout stops right after
+        // usLastCharIndex, 10 bytes short of sTypoAscender.
+        let mut data = vec![0u8; 68];
+        set_u16(&mut data, 0, 0);
+
+        let os2 = parse_os2(&data).unwrap();
+        assert_eq!(os2.version, 0);
+        assert_eq!(os2.typo_ascender, None);
+        assert_eq!(os2.typo_descender, None);
+        assert_eq!(os2.typo_line_gap, None);
+        assert_eq!(os2.win_ascent, None);
+        assert_eq!(os2.win_descent, None);
+    }
+
+    #[test]
+    fn rejects_an_os2_table_shorter_than_the_legacy_v0_layout() {
+        let data = vec![0u8; 60];
+        assert!(parse_os2(&data).is_err());
     }
 }
