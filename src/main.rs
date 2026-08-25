@@ -11,6 +11,7 @@ use tables::{HeadTable, HheaTable, Os2Table};
 fn main() -> ExitCode {
     let mut path = None;
     let mut font_index = 0usize;
+    let mut font_size = None;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -31,9 +32,25 @@ fn main() -> ExitCode {
                     }
                 };
             }
+            "--size" | "-s" => {
+                let value = match args.next() {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("fontmetrics: --size needs a number");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                font_size = match value.parse::<f64>() {
+                    Ok(n) if n > 0.0 && n.is_finite() => Some(n),
+                    _ => {
+                        eprintln!("fontmetrics: --size must be a positive number, got '{value}'");
+                        return ExitCode::FAILURE;
+                    }
+                };
+            }
             _ if path.is_none() => path = Some(arg),
             _ => {
-                eprintln!("usage: fontmetrics [--index N] <font-file>");
+                eprintln!("usage: fontmetrics [--index N] [--size SIZE] <font-file>");
                 return ExitCode::FAILURE;
             }
         }
@@ -42,7 +59,7 @@ fn main() -> ExitCode {
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: fontmetrics [--index N] <font-file>");
+            eprintln!("usage: fontmetrics [--index N] [--size SIZE] <font-file>");
             return ExitCode::FAILURE;
         }
     };
@@ -55,7 +72,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match build_report(&data, font_index) {
+    match build_report(&data, font_index, font_size) {
         Ok(report) => {
             print!("{report}");
             ExitCode::SUCCESS
@@ -71,7 +88,7 @@ fn main() -> ExitCode {
 /// separate from `main` so it can be exercised directly with in-memory
 /// bytes instead of files on disk. `font_index` selects which font to read
 /// out of a `.ttc` collection; plain single-font files only accept 0.
-fn build_report(data: &[u8], font_index: usize) -> Result<String, ParseError> {
+fn build_report(data: &[u8], font_index: usize, font_size: Option<f64>) -> Result<String, ParseError> {
     let directory = sfnt::parse_font(data, font_index)?;
 
     let head_record = sfnt::find_table(&directory, b"head").ok_or(ParseError::MissingTable("head"))?;
@@ -85,16 +102,31 @@ fn build_report(data: &[u8], font_index: usize) -> Result<String, ParseError> {
         None => None,
     };
 
-    Ok(format_report(&head, &hhea, os2.as_ref()))
+    Ok(format_report(&head, &hhea, os2.as_ref(), font_size))
 }
 
-fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>) -> String {
+/// Scales a font-units value to the given point size: `value * size /
+/// unitsPerEm`, the same formula every renderer uses to go from design units
+/// to output pixels.
+fn scale(value: i32, units_per_em: u16, font_size: f64) -> f64 {
+    value as f64 * font_size / units_per_em as f64
+}
+
+fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_size: Option<f64>) -> String {
     let mut out = String::new();
 
+    let print_metric = |out: &mut String, label: &str, value: i32| {
+        out.push_str(&format!("{label:<18}{value}"));
+        if let Some(size) = font_size {
+            out.push_str(&format!("  ({:.2} at size {})", scale(value, head.units_per_em, size), size));
+        }
+        out.push('\n');
+    };
+
     out.push_str(&format!("units per em:     {}\n", head.units_per_em));
-    out.push_str(&format!("hhea ascender:    {}\n", hhea.ascender));
-    out.push_str(&format!("hhea descender:   {}\n", hhea.descender));
-    out.push_str(&format!("hhea line gap:    {}\n", hhea.line_gap));
+    print_metric(&mut out, "hhea ascender:", hhea.ascender as i32);
+    print_metric(&mut out, "hhea descender:", hhea.descender as i32);
+    print_metric(&mut out, "hhea line gap:", hhea.line_gap as i32);
 
     match os2 {
         Some(os2) => {
@@ -107,17 +139,17 @@ fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>) -> 
             let win_ascent = os2.win_ascent.unwrap_or_else(|| hhea.ascender.max(0) as u16);
             let win_descent = os2.win_descent.unwrap_or_else(|| hhea.descender.unsigned_abs());
 
-            out.push_str(&format!("typo ascender:    {typo_ascender}\n"));
-            out.push_str(&format!("typo descender:   {typo_descender}\n"));
-            out.push_str(&format!("typo line gap:    {typo_line_gap}\n"));
-            out.push_str(&format!("win ascent:       {win_ascent}\n"));
-            out.push_str(&format!("win descent:      {win_descent}\n"));
+            print_metric(&mut out, "typo ascender:", typo_ascender as i32);
+            print_metric(&mut out, "typo descender:", typo_descender as i32);
+            print_metric(&mut out, "typo line gap:", typo_line_gap as i32);
+            print_metric(&mut out, "win ascent:", win_ascent as i32);
+            print_metric(&mut out, "win descent:", win_descent as i32);
             if os2.typo_ascender.is_none() {
                 out.push_str("  (typo/win fields above are from hhea: this font's OS/2 table is the old version 0 layout without them)\n");
             }
             if let (Some(cap), Some(x)) = (os2.cap_height, os2.x_height) {
-                out.push_str(&format!("cap height:       {cap}\n"));
-                out.push_str(&format!("x-height:         {x}\n"));
+                print_metric(&mut out, "cap height:", cap as i32);
+                print_metric(&mut out, "x-height:", x as i32);
             }
         }
         None => out.push_str("OS/2 table:       not present\n"),
@@ -175,7 +207,7 @@ mod tests {
     #[test]
     fn reports_metrics_from_a_minimal_font_without_os2() {
         let data = minimal_font();
-        let report = build_report(&data, 0).unwrap();
+        let report = build_report(&data, 0, None).unwrap();
 
         assert!(report.contains("units per em:     1000"));
         assert!(report.contains("hhea ascender:    800"));
@@ -184,12 +216,23 @@ mod tests {
     }
 
     #[test]
+    fn scales_metrics_to_a_target_font_size() {
+        let data = minimal_font();
+        let report = build_report(&data, 0, Some(16.0)).unwrap();
+
+        // 800 units at 1000 unitsPerEm, rendered at size 16: 800 * 16 / 1000 = 12.80
+        assert!(report.contains("hhea ascender:    800  (12.80 at size 16)"));
+        // -200 units at 1000 unitsPerEm, rendered at size 16: -200 * 16 / 1000 = -3.20
+        assert!(report.contains("hhea descender:   -200  (-3.20 at size 16)"));
+    }
+
+    #[test]
     fn fails_with_a_clear_error_when_head_is_missing() {
         let mut data = vec![0u8; 12];
         set_u32(&mut data, 0, 0x0001_0000);
         set_u16(&mut data, 4, 0);
 
-        assert_eq!(build_report(&data, 0), Err(ParseError::MissingTable("head")));
+        assert_eq!(build_report(&data, 0, None), Err(ParseError::MissingTable("head")));
     }
 
     /// Builds a font like `minimal_font`, but with an extra, legacy-shaped
@@ -222,7 +265,7 @@ mod tests {
     #[test]
     fn falls_back_to_hhea_for_a_legacy_os2_version_0_table() {
         let data = font_with_legacy_os2();
-        let report = build_report(&data, 0).unwrap();
+        let report = build_report(&data, 0, None).unwrap();
 
         assert!(report.contains("typo ascender:    800"));
         assert!(report.contains("typo descender:   -200"));
@@ -271,10 +314,10 @@ mod tests {
     fn reads_metrics_for_a_chosen_font_inside_a_collection() {
         let data = collection_with_two_fonts();
 
-        let report0 = build_report(&data, 0).unwrap();
+        let report0 = build_report(&data, 0, None).unwrap();
         assert!(report0.contains("OS/2 table:       not present"));
 
-        let report1 = build_report(&data, 1).unwrap();
+        let report1 = build_report(&data, 1, None).unwrap();
         assert!(report1.contains("typo ascender:    800"));
     }
 
@@ -282,7 +325,7 @@ mod tests {
     fn fails_with_a_clear_error_for_a_collection_index_out_of_range() {
         let data = collection_with_two_fonts();
         assert_eq!(
-            build_report(&data, 2),
+            build_report(&data, 2, None),
             Err(ParseError::FontIndexOutOfRange { index: 2, count: 2 })
         );
     }

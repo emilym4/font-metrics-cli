@@ -37,6 +37,21 @@ cap height:       714
 x-height:         523
 ```
 
+Pass `--size` (or `-s`) with a point size to also see each metric scaled to
+that size, the same `value * size / unitsPerEm` conversion a text layout
+engine does to go from font units to output pixels:
+
+```
+$ fontmetrics --size 16 /System/Library/Fonts/Helvetica.ttc
+```
+
+```
+units per em:     1000
+hhea ascender:    952  (15.23 at size 16)
+hhea descender:   -213  (-3.41 at size 16)
+hhea line gap:    0  (0.00 at size 16)
+```
+
 If the font has no `OS/2` table (some older or specialty fonts don't), the
 tool prints the `hhea` numbers and says so instead of guessing:
 
