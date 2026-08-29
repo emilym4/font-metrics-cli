@@ -12,6 +12,7 @@ fn main() -> ExitCode {
     let mut path = None;
     let mut font_index = 0usize;
     let mut font_size = None;
+    let mut json = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -48,9 +49,10 @@ fn main() -> ExitCode {
                     }
                 };
             }
+            "--json" => json = true,
             _ if path.is_none() => path = Some(arg),
             _ => {
-                eprintln!("usage: fontmetrics [--index N] [--size SIZE] <font-file>");
+                eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--json] <font-file>");
                 return ExitCode::FAILURE;
             }
         }
@@ -59,7 +61,7 @@ fn main() -> ExitCode {
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: fontmetrics [--index N] [--size SIZE] <font-file>");
+            eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--json] <font-file>");
             return ExitCode::FAILURE;
         }
     };
@@ -72,7 +74,9 @@ fn main() -> ExitCode {
         }
     };
 
-    match build_report(&data, font_index, font_size) {
+    let format = if json { OutputFormat::Json } else { OutputFormat::Text };
+
+    match build_report(&data, font_index, font_size, format) {
         Ok(report) => {
             print!("{report}");
             ExitCode::SUCCESS
@@ -84,11 +88,18 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parses the font bytes and renders a human-readable metrics report. Kept
-/// separate from `main` so it can be exercised directly with in-memory
-/// bytes instead of files on disk. `font_index` selects which font to read
-/// out of a `.ttc` collection; plain single-font files only accept 0.
-fn build_report(data: &[u8], font_index: usize, font_size: Option<f64>) -> Result<String, ParseError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
+/// Parses the font bytes and renders a metrics report in the requested
+/// format. Kept separate from `main` so it can be exercised directly with
+/// in-memory bytes instead of files on disk. `font_index` selects which
+/// font to read out of a `.ttc` collection; plain single-font files only
+/// accept 0.
+fn build_report(data: &[u8], font_index: usize, font_size: Option<f64>, format: OutputFormat) -> Result<String, ParseError> {
     let directory = sfnt::parse_font(data, font_index)?;
 
     let head_record = sfnt::find_table(&directory, b"head").ok_or(ParseError::MissingTable("head"))?;
@@ -102,7 +113,10 @@ fn build_report(data: &[u8], font_index: usize, font_size: Option<f64>) -> Resul
         None => None,
     };
 
-    Ok(format_report(&head, &hhea, os2.as_ref(), font_size))
+    Ok(match format {
+        OutputFormat::Text => format_report(&head, &hhea, os2.as_ref(), font_size),
+        OutputFormat::Json => format_json(&head, &hhea, os2.as_ref(), font_size),
+    })
 }
 
 /// Scales a font-units value to the given point size: `value * size /
@@ -158,6 +172,55 @@ fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, fon
     out
 }
 
+/// Renders the same numbers as `format_report`, but as a single JSON object
+/// so the output can be piped into another tool instead of parsed as text.
+/// Written by hand rather than pulling in a JSON crate: the shape is fixed
+/// and every value is a number or bool, so there's no string escaping to
+/// get wrong.
+fn format_json(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_size: Option<f64>) -> String {
+    let metric = |value: i32| -> String {
+        match font_size {
+            Some(size) => format!("{{ \"value\": {value}, \"scaled\": {} }}", scale(value, head.units_per_em, size)),
+            None => value.to_string(),
+        }
+    };
+
+    let mut fields = vec![
+        format!("\"unitsPerEm\": {}", head.units_per_em),
+        format!("\"hheaAscender\": {}", metric(hhea.ascender as i32)),
+        format!("\"hheaDescender\": {}", metric(hhea.descender as i32)),
+        format!("\"hheaLineGap\": {}", metric(hhea.line_gap as i32)),
+    ];
+
+    let os2_json = match os2 {
+        Some(os2) => {
+            let typo_ascender = os2.typo_ascender.unwrap_or(hhea.ascender);
+            let typo_descender = os2.typo_descender.unwrap_or(hhea.descender);
+            let typo_line_gap = os2.typo_line_gap.unwrap_or(hhea.line_gap);
+            let win_ascent = os2.win_ascent.unwrap_or_else(|| hhea.ascender.max(0) as u16);
+            let win_descent = os2.win_descent.unwrap_or_else(|| hhea.descender.unsigned_abs());
+
+            let mut os2_fields = vec![
+                format!("\"typoAscender\": {}", metric(typo_ascender as i32)),
+                format!("\"typoDescender\": {}", metric(typo_descender as i32)),
+                format!("\"typoLineGap\": {}", metric(typo_line_gap as i32)),
+                format!("\"winAscent\": {}", metric(win_ascent as i32)),
+                format!("\"winDescent\": {}", metric(win_descent as i32)),
+                format!("\"legacyFallback\": {}", os2.typo_ascender.is_none()),
+            ];
+            if let (Some(cap), Some(x)) = (os2.cap_height, os2.x_height) {
+                os2_fields.push(format!("\"capHeight\": {}", metric(cap as i32)));
+                os2_fields.push(format!("\"xHeight\": {}", metric(x as i32)));
+            }
+            format!("{{ {} }}", os2_fields.join(", "))
+        }
+        None => "null".to_string(),
+    };
+    fields.push(format!("\"os2\": {os2_json}"));
+
+    format!("{{\n  {}\n}}\n", fields.join(",\n  "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,7 +270,7 @@ mod tests {
     #[test]
     fn reports_metrics_from_a_minimal_font_without_os2() {
         let data = minimal_font();
-        let report = build_report(&data, 0, None).unwrap();
+        let report = build_report(&data, 0, None, OutputFormat::Text).unwrap();
 
         assert!(report.contains("units per em:     1000"));
         assert!(report.contains("hhea ascender:    800"));
@@ -218,7 +281,7 @@ mod tests {
     #[test]
     fn scales_metrics_to_a_target_font_size() {
         let data = minimal_font();
-        let report = build_report(&data, 0, Some(16.0)).unwrap();
+        let report = build_report(&data, 0, Some(16.0), OutputFormat::Text).unwrap();
 
         // 800 units at 1000 unitsPerEm, rendered at size 16: 800 * 16 / 1000 = 12.80
         assert!(report.contains("hhea ascender:    800  (12.80 at size 16)"));
@@ -232,7 +295,7 @@ mod tests {
         set_u32(&mut data, 0, 0x0001_0000);
         set_u16(&mut data, 4, 0);
 
-        assert_eq!(build_report(&data, 0, None), Err(ParseError::MissingTable("head")));
+        assert_eq!(build_report(&data, 0, None, OutputFormat::Text), Err(ParseError::MissingTable("head")));
     }
 
     /// Builds a font like `minimal_font`, but with an extra, legacy-shaped
@@ -265,7 +328,7 @@ mod tests {
     #[test]
     fn falls_back_to_hhea_for_a_legacy_os2_version_0_table() {
         let data = font_with_legacy_os2();
-        let report = build_report(&data, 0, None).unwrap();
+        let report = build_report(&data, 0, None, OutputFormat::Text).unwrap();
 
         assert!(report.contains("typo ascender:    800"));
         assert!(report.contains("typo descender:   -200"));
@@ -314,10 +377,10 @@ mod tests {
     fn reads_metrics_for_a_chosen_font_inside_a_collection() {
         let data = collection_with_two_fonts();
 
-        let report0 = build_report(&data, 0, None).unwrap();
+        let report0 = build_report(&data, 0, None, OutputFormat::Text).unwrap();
         assert!(report0.contains("OS/2 table:       not present"));
 
-        let report1 = build_report(&data, 1, None).unwrap();
+        let report1 = build_report(&data, 1, None, OutputFormat::Text).unwrap();
         assert!(report1.contains("typo ascender:    800"));
     }
 
@@ -325,8 +388,37 @@ mod tests {
     fn fails_with_a_clear_error_for_a_collection_index_out_of_range() {
         let data = collection_with_two_fonts();
         assert_eq!(
-            build_report(&data, 2, None),
+            build_report(&data, 2, None, OutputFormat::Text),
             Err(ParseError::FontIndexOutOfRange { index: 2, count: 2 })
         );
+    }
+
+    #[test]
+    fn reports_metrics_as_json_without_os2() {
+        let data = minimal_font();
+        let report = build_report(&data, 0, None, OutputFormat::Json).unwrap();
+
+        assert!(report.contains("\"unitsPerEm\": 1000"));
+        assert!(report.contains("\"hheaAscender\": 800"));
+        assert!(report.contains("\"hheaDescender\": -200"));
+        assert!(report.contains("\"os2\": null"));
+    }
+
+    #[test]
+    fn scales_json_metrics_to_a_target_font_size() {
+        let data = minimal_font();
+        let report = build_report(&data, 0, Some(16.0), OutputFormat::Json).unwrap();
+
+        assert!(report.contains("\"hheaAscender\": { \"value\": 800, \"scaled\": 12.8 }"));
+        assert!(report.contains("\"hheaDescender\": { \"value\": -200, \"scaled\": -3.2 }"));
+    }
+
+    #[test]
+    fn reports_os2_fallback_as_json() {
+        let data = font_with_legacy_os2();
+        let report = build_report(&data, 0, None, OutputFormat::Json).unwrap();
+
+        assert!(report.contains("\"typoAscender\": 800"));
+        assert!(report.contains("\"legacyFallback\": true"));
     }
 }

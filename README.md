@@ -63,6 +63,27 @@ hhea line gap:    67
 OS/2 table:       not present
 ```
 
+Pass `--json` to get the same numbers as a single JSON object instead, for
+piping into another tool:
+
+```
+$ fontmetrics --json /System/Library/Fonts/Helvetica.ttc
+```
+
+```json
+{
+  "unitsPerEm": 1000,
+  "hheaAscender": 952,
+  "hheaDescender": -213,
+  "hheaLineGap": 0,
+  "os2": { "typoAscender": 952, "typoDescender": -213, "typoLineGap": 0, "winAscent": 952, "winDescent": 213, "legacyFallback": false, "capHeight": 714, "xHeight": 523 }
+}
+```
+
+If the font has no `OS/2` table, `"os2"` is `null`. Combined with `--size`,
+each metric becomes an object with `value` (font units) and `scaled` (at the
+given size) instead of a bare number.
+
 ## How it works
 
 An sfnt font file (the container format behind both `.ttf` and `.otf`)
