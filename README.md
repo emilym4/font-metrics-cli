@@ -24,6 +24,7 @@ $ fontmetrics --index 1 /System/Library/Fonts/Helvetica.ttc
 ```
 
 ```
+outline format:   TrueType (glyf outlines)
 units per em:     1000
 hhea ascender:    952
 hhea descender:   -213
@@ -36,6 +37,12 @@ win descent:      213
 cap height:       714
 x-height:         523
 ```
+
+`outline format` is read straight off the table directory: a `CFF2` or `CFF `
+table means PostScript outlines, `glyf` means TrueType outlines. It doesn't
+require parsing the outline data itself, and the rest of the report is
+identical either way since `head`, `hhea`, and `OS/2` are laid out the same
+regardless of outline format.
 
 Pass `--size` (or `-s`) with a point size to also see each metric scaled to
 that size, the same `value * size / unitsPerEm` conversion a text layout
@@ -72,6 +79,7 @@ $ fontmetrics --json /System/Library/Fonts/Helvetica.ttc
 
 ```json
 {
+  "outlineFormat": "TrueType (glyf outlines)",
   "unitsPerEm": 1000,
   "hheaAscender": 952,
   "hheaDescender": -213,
@@ -121,9 +129,10 @@ win descent:      200
 
 ## Limitations (for now)
 
-- CFF-flavored OpenType fonts (`OTTO`) report metrics fine since `head`,
-  `hhea`, and `OS/2` are the same either way, but nothing CFF-specific
-  (like glyph outlines) is read.
+- Only the font-wide vertical metrics are read. Per-glyph metrics (advance
+  widths from `hmtx`, individual glyph outlines from `glyf` or `CFF `/`CFF2`)
+  are out of scope; `outline format` reports which of those tables is
+  present without parsing its contents.
 
 ## License
 

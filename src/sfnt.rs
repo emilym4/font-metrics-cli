@@ -131,6 +131,23 @@ pub fn find_table(directory: &TableDirectory, tag: &[u8; 4]) -> Option<TableReco
     directory.records.iter().find(|r| &r.tag == tag).copied()
 }
 
+/// Identifies which glyph outline format a font uses, based on which
+/// outline table its directory lists. This only looks at the directory
+/// entries, not the outline data itself - `head`/`hhea`/`OS/2` are laid
+/// out identically either way, so the vertical metrics this tool reports
+/// don't depend on the answer, but it's useful context in the report.
+pub fn outline_format(directory: &TableDirectory) -> &'static str {
+    if find_table(directory, b"CFF2").is_some() {
+        "CFF2 (PostScript outlines)"
+    } else if find_table(directory, b"CFF ").is_some() {
+        "CFF (PostScript outlines)"
+    } else if find_table(directory, b"glyf").is_some() {
+        "TrueType (glyf outlines)"
+    } else {
+        "unknown"
+    }
+}
+
 /// Slices out the raw bytes for a table record, bounds-checked against the
 /// whole file so a corrupt offset/length can't panic instead of erroring.
 pub fn table_bytes<'a>(data: &'a [u8], record: &TableRecord) -> Result<&'a [u8], ParseError> {
@@ -299,5 +316,48 @@ mod tests {
         let data = sample_font_with_one_table();
         let directory = parse_font(&data, 0).unwrap();
         assert_eq!(directory.sfnt_version, 0x0001_0000);
+    }
+
+    #[test]
+    fn identifies_truetype_outlines_from_a_glyf_table() {
+        let data = sample_font_with_one_table();
+        let mut directory = parse_font(&data, 0).unwrap();
+        directory.records[0].tag = *b"glyf";
+
+        assert_eq!(outline_format(&directory), "TrueType (glyf outlines)");
+    }
+
+    #[test]
+    fn identifies_cff_outlines_from_a_cff_table() {
+        let data = sample_collection_with_two_fonts();
+        let font_b = parse_font(&data, 1).unwrap();
+
+        assert_eq!(outline_format(&font_b), "CFF (PostScript outlines)");
+    }
+
+    #[test]
+    fn prefers_cff2_over_cff_when_both_are_present() {
+        let directory = TableDirectory {
+            sfnt_version: 0x4f54_544f,
+            records: vec![
+                TableRecord { tag: *b"CFF ", checksum: 0, offset: 0, length: 0 },
+                TableRecord { tag: *b"CFF2", checksum: 0, offset: 0, length: 0 },
+            ],
+        };
+
+        assert_eq!(outline_format(&directory), "CFF2 (PostScript outlines)");
+    }
+
+    #[test]
+    fn reports_unknown_outline_format_when_neither_table_is_present() {
+        let data = minimal_head_only_directory();
+        assert_eq!(outline_format(&data), "unknown");
+    }
+
+    fn minimal_head_only_directory() -> TableDirectory {
+        TableDirectory {
+            sfnt_version: 0x0001_0000,
+            records: vec![TableRecord { tag: *b"head", checksum: 0, offset: 0, length: 0 }],
+        }
     }
 }

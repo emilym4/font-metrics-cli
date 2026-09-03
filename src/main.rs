@@ -101,6 +101,7 @@ enum OutputFormat {
 /// accept 0.
 fn build_report(data: &[u8], font_index: usize, font_size: Option<f64>, format: OutputFormat) -> Result<String, ParseError> {
     let directory = sfnt::parse_font(data, font_index)?;
+    let outline_format = sfnt::outline_format(&directory);
 
     let head_record = sfnt::find_table(&directory, b"head").ok_or(ParseError::MissingTable("head"))?;
     let head = tables::parse_head(sfnt::table_bytes(data, &head_record)?)?;
@@ -114,8 +115,8 @@ fn build_report(data: &[u8], font_index: usize, font_size: Option<f64>, format: 
     };
 
     Ok(match format {
-        OutputFormat::Text => format_report(&head, &hhea, os2.as_ref(), font_size),
-        OutputFormat::Json => format_json(&head, &hhea, os2.as_ref(), font_size),
+        OutputFormat::Text => format_report(&head, &hhea, os2.as_ref(), font_size, outline_format),
+        OutputFormat::Json => format_json(&head, &hhea, os2.as_ref(), font_size, outline_format),
     })
 }
 
@@ -126,7 +127,7 @@ fn scale(value: i32, units_per_em: u16, font_size: f64) -> f64 {
     value as f64 * font_size / units_per_em as f64
 }
 
-fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_size: Option<f64>) -> String {
+fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_size: Option<f64>, outline_format: &str) -> String {
     let mut out = String::new();
 
     let print_metric = |out: &mut String, label: &str, value: i32| {
@@ -137,6 +138,7 @@ fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, fon
         out.push('\n');
     };
 
+    out.push_str(&format!("outline format:   {outline_format}\n"));
     out.push_str(&format!("units per em:     {}\n", head.units_per_em));
     print_metric(&mut out, "hhea ascender:", hhea.ascender as i32);
     print_metric(&mut out, "hhea descender:", hhea.descender as i32);
@@ -177,7 +179,7 @@ fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, fon
 /// Written by hand rather than pulling in a JSON crate: the shape is fixed
 /// and every value is a number or bool, so there's no string escaping to
 /// get wrong.
-fn format_json(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_size: Option<f64>) -> String {
+fn format_json(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_size: Option<f64>, outline_format: &str) -> String {
     let metric = |value: i32| -> String {
         match font_size {
             Some(size) => format!("{{ \"value\": {value}, \"scaled\": {} }}", scale(value, head.units_per_em, size)),
@@ -186,6 +188,7 @@ fn format_json(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_
     };
 
     let mut fields = vec![
+        format!("\"outlineFormat\": \"{outline_format}\""),
         format!("\"unitsPerEm\": {}", head.units_per_em),
         format!("\"hheaAscender\": {}", metric(hhea.ascender as i32)),
         format!("\"hheaDescender\": {}", metric(hhea.descender as i32)),
@@ -420,5 +423,56 @@ mod tests {
 
         assert!(report.contains("\"typoAscender\": 800"));
         assert!(report.contains("\"legacyFallback\": true"));
+    }
+
+    /// Builds a font like `minimal_font`, but with a `CFF ` table added to
+    /// the directory (with no real CFF data, since only its presence in the
+    /// directory matters for outline format detection) so the report can be
+    /// checked for an OpenType/CFF flavored font.
+    fn font_with_cff_outlines() -> Vec<u8> {
+        let head_len = 46;
+        let hhea_len = 36;
+        let cff_len = 4;
+        let head_offset = 12 + 3 * 16;
+        let hhea_offset = head_offset + head_len;
+        let cff_offset = hhea_offset + hhea_len;
+
+        let mut data = vec![0u8; cff_offset + cff_len];
+        set_u32(&mut data, 0, 0x4f54_544f); // "OTTO"
+        set_u16(&mut data, 4, 3);
+
+        write_table_record(&mut data, 0, b"head", head_offset as u32, head_len as u32);
+        write_table_record(&mut data, 1, b"hhea", hhea_offset as u32, hhea_len as u32);
+        write_table_record(&mut data, 2, b"CFF ", cff_offset as u32, cff_len as u32);
+
+        set_u16(&mut data, head_offset + 18, 1000); // unitsPerEm
+        set_i16(&mut data, hhea_offset + 4, 800); // ascender
+        set_i16(&mut data, hhea_offset + 6, -200); // descender
+
+        data
+    }
+
+    #[test]
+    fn reports_unknown_outline_format_when_no_outline_table_is_present() {
+        let data = minimal_font();
+        let report = build_report(&data, 0, None, OutputFormat::Text).unwrap();
+
+        assert!(report.contains("outline format:   unknown"));
+    }
+
+    #[test]
+    fn reports_the_outline_format_for_a_cff_flavored_opentype_font() {
+        let data = font_with_cff_outlines();
+        let report = build_report(&data, 0, None, OutputFormat::Text).unwrap();
+
+        assert!(report.contains("outline format:   CFF (PostScript outlines)"));
+    }
+
+    #[test]
+    fn reports_the_outline_format_as_json() {
+        let data = font_with_cff_outlines();
+        let report = build_report(&data, 0, None, OutputFormat::Json).unwrap();
+
+        assert!(report.contains("\"outlineFormat\": \"CFF (PostScript outlines)\""));
     }
 }
