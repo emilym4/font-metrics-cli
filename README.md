@@ -92,6 +92,22 @@ If the font has no `OS/2` table, `"os2"` is `null`. Combined with `--size`,
 each metric becomes an object with `value` (font units) and `scaled` (at the
 given size) instead of a bare number.
 
+Pass `--glyph` (or `-g`) with a glyph id to also look up that glyph's advance
+width from `hmtx`:
+
+```
+$ fontmetrics --glyph 40 /System/Library/Fonts/Helvetica.ttc
+```
+
+```
+...
+glyph 40 advance: 556
+```
+
+This takes a raw glyph id, not a character - there's no cmap lookup here, so
+turning a character into a glyph id is left to another tool. The id must be
+less than the font's glyph count (from `maxp`); anything else is an error.
+
 ## How it works
 
 An sfnt font file (the container format behind both `.ttf` and `.otf`)
@@ -129,10 +145,11 @@ win descent:      200
 
 ## Limitations (for now)
 
-- Only the font-wide vertical metrics are read. Per-glyph metrics (advance
-  widths from `hmtx`, individual glyph outlines from `glyf` or `CFF `/`CFF2`)
-  are out of scope; `outline format` reports which of those tables is
-  present without parsing its contents.
+- Per-glyph advance widths are readable with `--glyph`, but individual glyph
+  outlines (from `glyf` or `CFF `/`CFF2`) are out of scope; `outline format`
+  reports which outline table is present without parsing its contents.
+- There's no cmap support, so `--glyph` takes a raw glyph id rather than a
+  character.
 
 ## License
 

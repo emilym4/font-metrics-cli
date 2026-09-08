@@ -107,6 +107,50 @@ pub fn parse_os2(data: &[u8]) -> Result<Os2Table, ParseError> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxpTable {
+    pub num_glyphs: u16,
+}
+
+pub fn parse_maxp(data: &[u8]) -> Result<MaxpTable, ParseError> {
+    // Version 0.5 (CFF-flavored fonts) is just version (4 bytes) + numGlyphs;
+    // version 1.0 (TrueType) tacks on a bunch of glyf-related maximums after
+    // that, none of which this tool needs.
+    const MIN_LEN: usize = 6;
+    if data.len() < MIN_LEN {
+        return Err(ParseError::UnexpectedTableLength { table: "maxp", needed: MIN_LEN, have: data.len() });
+    }
+
+    Ok(MaxpTable { num_glyphs: read_u16(data, 4) })
+}
+
+/// Expands `hmtx` into one advance width per glyph.
+///
+/// The table only stores `number_of_h_metrics` explicit (advanceWidth, lsb)
+/// pairs; any glyph past that reuses the last stored advance width and has
+/// only an lsb entry of its own. That's why the return value is sized to
+/// `num_glyphs` (from `maxp`) rather than to the table's own byte length.
+pub fn parse_hmtx(data: &[u8], number_of_h_metrics: u16, num_glyphs: u16) -> Result<Vec<u16>, ParseError> {
+    let number_of_h_metrics = number_of_h_metrics as usize;
+    let num_glyphs = num_glyphs as usize;
+
+    let needed = number_of_h_metrics * 4;
+    if data.len() < needed {
+        return Err(ParseError::UnexpectedTableLength { table: "hmtx", needed, have: data.len() });
+    }
+
+    let long_metrics = number_of_h_metrics.min(num_glyphs);
+    let mut widths = Vec::with_capacity(num_glyphs);
+    for i in 0..long_metrics {
+        widths.push(read_u16(data, i * 4));
+    }
+
+    let last_width = widths.last().copied().unwrap_or(0);
+    widths.resize(num_glyphs, last_width);
+
+    Ok(widths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +249,40 @@ mod tests {
     fn rejects_an_os2_table_shorter_than_the_legacy_v0_layout() {
         let data = vec![0u8; 60];
         assert!(parse_os2(&data).is_err());
+    }
+
+    #[test]
+    fn parses_num_glyphs_from_a_version_0_5_maxp_table() {
+        let mut data = vec![0u8; 6];
+        set_u16(&mut data, 4, 300);
+
+        let maxp = parse_maxp(&data).unwrap();
+        assert_eq!(maxp.num_glyphs, 300);
+    }
+
+    #[test]
+    fn rejects_a_maxp_table_shorter_than_num_glyphs() {
+        let data = vec![0u8; 4];
+        assert!(parse_maxp(&data).is_err());
+    }
+
+    #[test]
+    fn expands_hmtx_long_metrics_into_one_width_per_glyph() {
+        // Two long metrics (advanceWidth, lsb), covering all three glyphs
+        // would need a third one, so glyph 2 should reuse glyph 1's width.
+        let mut data = vec![0u8; 8];
+        set_u16(&mut data, 0, 500); // glyph 0 advance width
+        set_i16(&mut data, 2, 10); // glyph 0 lsb
+        set_u16(&mut data, 4, 600); // glyph 1 advance width
+        set_i16(&mut data, 6, 20); // glyph 1 lsb
+
+        let widths = parse_hmtx(&data, 2, 3).unwrap();
+        assert_eq!(widths, vec![500, 600, 600]);
+    }
+
+    #[test]
+    fn rejects_an_hmtx_table_shorter_than_its_long_metrics() {
+        let data = vec![0u8; 4]; // only one long metric's worth of bytes
+        assert!(parse_hmtx(&data, 2, 5).is_err());
     }
 }

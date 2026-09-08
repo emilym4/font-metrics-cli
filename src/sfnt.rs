@@ -31,6 +31,7 @@ pub enum ParseError {
         have: usize,
     },
     FontIndexOutOfRange { index: usize, count: usize },
+    GlyphIndexOutOfRange { index: u16, count: u16 },
 }
 
 impl fmt::Display for ParseError {
@@ -47,6 +48,9 @@ impl fmt::Display for ParseError {
             }
             ParseError::FontIndexOutOfRange { index, count } => {
                 write!(f, "font index {index} out of range: file contains {count} font(s)")
+            }
+            ParseError::GlyphIndexOutOfRange { index, count } => {
+                write!(f, "glyph {index} out of range: font contains {count} glyph(s)")
             }
         }
     }

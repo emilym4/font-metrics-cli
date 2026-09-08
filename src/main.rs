@@ -12,6 +12,7 @@ fn main() -> ExitCode {
     let mut path = None;
     let mut font_index = 0usize;
     let mut font_size = None;
+    let mut glyph_id = None;
     let mut json = false;
 
     let mut args = env::args().skip(1);
@@ -49,10 +50,26 @@ fn main() -> ExitCode {
                     }
                 };
             }
+            "--glyph" | "-g" => {
+                let value = match args.next() {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("fontmetrics: --glyph needs a glyph id");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                glyph_id = match value.parse() {
+                    Ok(n) => Some(n),
+                    Err(_) => {
+                        eprintln!("fontmetrics: --glyph must be a non-negative integer, got '{value}'");
+                        return ExitCode::FAILURE;
+                    }
+                };
+            }
             "--json" => json = true,
             _ if path.is_none() => path = Some(arg),
             _ => {
-                eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--json] <font-file>");
+                eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--glyph ID] [--json] <font-file>");
                 return ExitCode::FAILURE;
             }
         }
@@ -61,7 +78,7 @@ fn main() -> ExitCode {
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--json] <font-file>");
+            eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--glyph ID] [--json] <font-file>");
             return ExitCode::FAILURE;
         }
     };
@@ -76,7 +93,7 @@ fn main() -> ExitCode {
 
     let format = if json { OutputFormat::Json } else { OutputFormat::Text };
 
-    match build_report(&data, font_index, font_size, format) {
+    match build_report(&data, font_index, font_size, glyph_id, format) {
         Ok(report) => {
             print!("{report}");
             ExitCode::SUCCESS
@@ -98,8 +115,15 @@ enum OutputFormat {
 /// format. Kept separate from `main` so it can be exercised directly with
 /// in-memory bytes instead of files on disk. `font_index` selects which
 /// font to read out of a `.ttc` collection; plain single-font files only
-/// accept 0.
-fn build_report(data: &[u8], font_index: usize, font_size: Option<f64>, format: OutputFormat) -> Result<String, ParseError> {
+/// accept 0. `glyph_id`, if given, also looks up that glyph's advance width
+/// from `hmtx`.
+fn build_report(
+    data: &[u8],
+    font_index: usize,
+    font_size: Option<f64>,
+    glyph_id: Option<u16>,
+    format: OutputFormat,
+) -> Result<String, ParseError> {
     let directory = sfnt::parse_font(data, font_index)?;
     let outline_format = sfnt::outline_format(&directory);
 
@@ -114,9 +138,24 @@ fn build_report(data: &[u8], font_index: usize, font_size: Option<f64>, format: 
         None => None,
     };
 
+    let glyph_advance = match glyph_id {
+        Some(id) => {
+            let maxp_record = sfnt::find_table(&directory, b"maxp").ok_or(ParseError::MissingTable("maxp"))?;
+            let maxp = tables::parse_maxp(sfnt::table_bytes(data, &maxp_record)?)?;
+            if id >= maxp.num_glyphs {
+                return Err(ParseError::GlyphIndexOutOfRange { index: id, count: maxp.num_glyphs });
+            }
+
+            let hmtx_record = sfnt::find_table(&directory, b"hmtx").ok_or(ParseError::MissingTable("hmtx"))?;
+            let widths = tables::parse_hmtx(sfnt::table_bytes(data, &hmtx_record)?, hhea.number_of_h_metrics, maxp.num_glyphs)?;
+            Some((id, widths[id as usize]))
+        }
+        None => None,
+    };
+
     Ok(match format {
-        OutputFormat::Text => format_report(&head, &hhea, os2.as_ref(), font_size, outline_format),
-        OutputFormat::Json => format_json(&head, &hhea, os2.as_ref(), font_size, outline_format),
+        OutputFormat::Text => format_report(&head, &hhea, os2.as_ref(), font_size, glyph_advance, outline_format),
+        OutputFormat::Json => format_json(&head, &hhea, os2.as_ref(), font_size, glyph_advance, outline_format),
     })
 }
 
@@ -127,7 +166,14 @@ fn scale(value: i32, units_per_em: u16, font_size: f64) -> f64 {
     value as f64 * font_size / units_per_em as f64
 }
 
-fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_size: Option<f64>, outline_format: &str) -> String {
+fn format_report(
+    head: &HeadTable,
+    hhea: &HheaTable,
+    os2: Option<&Os2Table>,
+    font_size: Option<f64>,
+    glyph_advance: Option<(u16, u16)>,
+    outline_format: &str,
+) -> String {
     let mut out = String::new();
 
     let print_metric = |out: &mut String, label: &str, value: i32| {
@@ -171,6 +217,10 @@ fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, fon
         None => out.push_str("OS/2 table:       not present\n"),
     }
 
+    if let Some((id, width)) = glyph_advance {
+        print_metric(&mut out, &format!("glyph {id} advance:"), width as i32);
+    }
+
     out
 }
 
@@ -179,7 +229,14 @@ fn format_report(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, fon
 /// Written by hand rather than pulling in a JSON crate: the shape is fixed
 /// and every value is a number or bool, so there's no string escaping to
 /// get wrong.
-fn format_json(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_size: Option<f64>, outline_format: &str) -> String {
+fn format_json(
+    head: &HeadTable,
+    hhea: &HheaTable,
+    os2: Option<&Os2Table>,
+    font_size: Option<f64>,
+    glyph_advance: Option<(u16, u16)>,
+    outline_format: &str,
+) -> String {
     let metric = |value: i32| -> String {
         match font_size {
             Some(size) => format!("{{ \"value\": {value}, \"scaled\": {} }}", scale(value, head.units_per_em, size)),
@@ -220,6 +277,10 @@ fn format_json(head: &HeadTable, hhea: &HheaTable, os2: Option<&Os2Table>, font_
         None => "null".to_string(),
     };
     fields.push(format!("\"os2\": {os2_json}"));
+
+    if let Some((id, width)) = glyph_advance {
+        fields.push(format!("\"glyph\": {{ \"id\": {id}, \"advanceWidth\": {} }}", metric(width as i32)));
+    }
 
     format!("{{\n  {}\n}}\n", fields.join(",\n  "))
 }
@@ -273,7 +334,7 @@ mod tests {
     #[test]
     fn reports_metrics_from_a_minimal_font_without_os2() {
         let data = minimal_font();
-        let report = build_report(&data, 0, None, OutputFormat::Text).unwrap();
+        let report = build_report(&data, 0, None, None, OutputFormat::Text).unwrap();
 
         assert!(report.contains("units per em:     1000"));
         assert!(report.contains("hhea ascender:    800"));
@@ -284,7 +345,7 @@ mod tests {
     #[test]
     fn scales_metrics_to_a_target_font_size() {
         let data = minimal_font();
-        let report = build_report(&data, 0, Some(16.0), OutputFormat::Text).unwrap();
+        let report = build_report(&data, 0, Some(16.0), None, OutputFormat::Text).unwrap();
 
         // 800 units at 1000 unitsPerEm, rendered at size 16: 800 * 16 / 1000 = 12.80
         assert!(report.contains("hhea ascender:    800  (12.80 at size 16)"));
@@ -298,7 +359,7 @@ mod tests {
         set_u32(&mut data, 0, 0x0001_0000);
         set_u16(&mut data, 4, 0);
 
-        assert_eq!(build_report(&data, 0, None, OutputFormat::Text), Err(ParseError::MissingTable("head")));
+        assert_eq!(build_report(&data, 0, None, None, OutputFormat::Text), Err(ParseError::MissingTable("head")));
     }
 
     /// Builds a font like `minimal_font`, but with an extra, legacy-shaped
@@ -331,7 +392,7 @@ mod tests {
     #[test]
     fn falls_back_to_hhea_for_a_legacy_os2_version_0_table() {
         let data = font_with_legacy_os2();
-        let report = build_report(&data, 0, None, OutputFormat::Text).unwrap();
+        let report = build_report(&data, 0, None, None, OutputFormat::Text).unwrap();
 
         assert!(report.contains("typo ascender:    800"));
         assert!(report.contains("typo descender:   -200"));
@@ -380,10 +441,10 @@ mod tests {
     fn reads_metrics_for_a_chosen_font_inside_a_collection() {
         let data = collection_with_two_fonts();
 
-        let report0 = build_report(&data, 0, None, OutputFormat::Text).unwrap();
+        let report0 = build_report(&data, 0, None, None, OutputFormat::Text).unwrap();
         assert!(report0.contains("OS/2 table:       not present"));
 
-        let report1 = build_report(&data, 1, None, OutputFormat::Text).unwrap();
+        let report1 = build_report(&data, 1, None, None, OutputFormat::Text).unwrap();
         assert!(report1.contains("typo ascender:    800"));
     }
 
@@ -391,7 +452,7 @@ mod tests {
     fn fails_with_a_clear_error_for_a_collection_index_out_of_range() {
         let data = collection_with_two_fonts();
         assert_eq!(
-            build_report(&data, 2, None, OutputFormat::Text),
+            build_report(&data, 2, None, None, OutputFormat::Text),
             Err(ParseError::FontIndexOutOfRange { index: 2, count: 2 })
         );
     }
@@ -399,7 +460,7 @@ mod tests {
     #[test]
     fn reports_metrics_as_json_without_os2() {
         let data = minimal_font();
-        let report = build_report(&data, 0, None, OutputFormat::Json).unwrap();
+        let report = build_report(&data, 0, None, None, OutputFormat::Json).unwrap();
 
         assert!(report.contains("\"unitsPerEm\": 1000"));
         assert!(report.contains("\"hheaAscender\": 800"));
@@ -410,7 +471,7 @@ mod tests {
     #[test]
     fn scales_json_metrics_to_a_target_font_size() {
         let data = minimal_font();
-        let report = build_report(&data, 0, Some(16.0), OutputFormat::Json).unwrap();
+        let report = build_report(&data, 0, Some(16.0), None, OutputFormat::Json).unwrap();
 
         assert!(report.contains("\"hheaAscender\": { \"value\": 800, \"scaled\": 12.8 }"));
         assert!(report.contains("\"hheaDescender\": { \"value\": -200, \"scaled\": -3.2 }"));
@@ -419,7 +480,7 @@ mod tests {
     #[test]
     fn reports_os2_fallback_as_json() {
         let data = font_with_legacy_os2();
-        let report = build_report(&data, 0, None, OutputFormat::Json).unwrap();
+        let report = build_report(&data, 0, None, None, OutputFormat::Json).unwrap();
 
         assert!(report.contains("\"typoAscender\": 800"));
         assert!(report.contains("\"legacyFallback\": true"));
@@ -455,7 +516,7 @@ mod tests {
     #[test]
     fn reports_unknown_outline_format_when_no_outline_table_is_present() {
         let data = minimal_font();
-        let report = build_report(&data, 0, None, OutputFormat::Text).unwrap();
+        let report = build_report(&data, 0, None, None, OutputFormat::Text).unwrap();
 
         assert!(report.contains("outline format:   unknown"));
     }
@@ -463,7 +524,7 @@ mod tests {
     #[test]
     fn reports_the_outline_format_for_a_cff_flavored_opentype_font() {
         let data = font_with_cff_outlines();
-        let report = build_report(&data, 0, None, OutputFormat::Text).unwrap();
+        let report = build_report(&data, 0, None, None, OutputFormat::Text).unwrap();
 
         assert!(report.contains("outline format:   CFF (PostScript outlines)"));
     }
@@ -471,8 +532,78 @@ mod tests {
     #[test]
     fn reports_the_outline_format_as_json() {
         let data = font_with_cff_outlines();
-        let report = build_report(&data, 0, None, OutputFormat::Json).unwrap();
+        let report = build_report(&data, 0, None, None, OutputFormat::Json).unwrap();
 
         assert!(report.contains("\"outlineFormat\": \"CFF (PostScript outlines)\""));
+    }
+
+    /// Builds a font like `minimal_font`, but with `maxp` and `hmtx` tables
+    /// added so glyph advance width lookups have something to read. Three
+    /// glyphs, two long metrics: glyph 2 reuses glyph 1's advance width.
+    fn font_with_hmtx() -> Vec<u8> {
+        let head_len = 46;
+        let hhea_len = 36;
+        let maxp_len = 6;
+        let hmtx_len = 2 * 4; // two long metrics, covering all 3 glyphs
+        let head_offset = 12 + 4 * 16;
+        let hhea_offset = head_offset + head_len;
+        let maxp_offset = hhea_offset + hhea_len;
+        let hmtx_offset = maxp_offset + maxp_len;
+
+        let mut data = vec![0u8; hmtx_offset + hmtx_len];
+        set_u32(&mut data, 0, 0x0001_0000);
+        set_u16(&mut data, 4, 4);
+
+        write_table_record(&mut data, 0, b"head", head_offset as u32, head_len as u32);
+        write_table_record(&mut data, 1, b"hhea", hhea_offset as u32, hhea_len as u32);
+        write_table_record(&mut data, 2, b"maxp", maxp_offset as u32, maxp_len as u32);
+        write_table_record(&mut data, 3, b"hmtx", hmtx_offset as u32, hmtx_len as u32);
+
+        set_u16(&mut data, head_offset + 18, 1000); // unitsPerEm
+        set_i16(&mut data, hhea_offset + 4, 800); // ascender
+        set_i16(&mut data, hhea_offset + 6, -200); // descender
+        set_u16(&mut data, hhea_offset + 34, 2); // numberOfHMetrics
+        set_u16(&mut data, maxp_offset + 4, 3); // numGlyphs
+
+        set_u16(&mut data, hmtx_offset, 500); // glyph 0 advance width
+        set_i16(&mut data, hmtx_offset + 2, 10); // glyph 0 lsb
+        set_u16(&mut data, hmtx_offset + 4, 600); // glyph 1 advance width
+        set_i16(&mut data, hmtx_offset + 6, 20); // glyph 1 lsb
+
+        data
+    }
+
+    #[test]
+    fn reports_advance_width_for_a_requested_glyph() {
+        let data = font_with_hmtx();
+        let report = build_report(&data, 0, None, Some(0), OutputFormat::Text).unwrap();
+
+        assert!(report.contains("glyph 0 advance:  500"));
+    }
+
+    #[test]
+    fn reports_advance_width_for_a_glyph_past_the_long_metrics() {
+        let data = font_with_hmtx();
+        let report = build_report(&data, 0, None, Some(2), OutputFormat::Text).unwrap();
+
+        // Glyph 2 is past numberOfHMetrics (2), so it reuses glyph 1's width.
+        assert!(report.contains("glyph 2 advance:  600"));
+    }
+
+    #[test]
+    fn reports_advance_width_as_json() {
+        let data = font_with_hmtx();
+        let report = build_report(&data, 0, None, Some(1), OutputFormat::Json).unwrap();
+
+        assert!(report.contains("\"glyph\": { \"id\": 1, \"advanceWidth\": 600 }"));
+    }
+
+    #[test]
+    fn fails_with_a_clear_error_for_a_glyph_id_out_of_range() {
+        let data = font_with_hmtx();
+        assert_eq!(
+            build_report(&data, 0, None, Some(3), OutputFormat::Text),
+            Err(ParseError::GlyphIndexOutOfRange { index: 3, count: 3 })
+        );
     }
 }
