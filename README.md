@@ -108,6 +108,16 @@ This takes a raw glyph id, not a character - there's no cmap lookup here, so
 turning a character into a glyph id is left to another tool. The id must be
 less than the font's glyph count (from `maxp`); anything else is an error.
 
+Pass `-` as the font file to read the font bytes from stdin instead, so the
+tool can sit at the end of a pipeline:
+
+```
+$ cat /System/Library/Fonts/Helvetica.ttc | fontmetrics -
+```
+
+Whatever's upstream needs to hand over raw sfnt bytes, not a compressed
+`.woff`/`.woff2` container - this tool doesn't decompress those.
+
 ## How it works
 
 An sfnt font file (the container format behind both `.ttf` and `.otf`)

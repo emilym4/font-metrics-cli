@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::{self, Read};
 use std::process::ExitCode;
 
 mod sfnt;
@@ -83,11 +84,22 @@ fn main() -> ExitCode {
         }
     };
 
-    let data = match fs::read(&path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("fontmetrics: cannot read {path}: {e}");
-            return ExitCode::FAILURE;
+    let data = if path == "-" {
+        let mut buf = Vec::new();
+        match io::stdin().read_to_end(&mut buf) {
+            Ok(_) => buf,
+            Err(e) => {
+                eprintln!("fontmetrics: cannot read stdin: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        match fs::read(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("fontmetrics: cannot read {path}: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     };
 
