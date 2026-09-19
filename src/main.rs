@@ -15,6 +15,7 @@ fn main() -> ExitCode {
     let mut font_size = None;
     let mut glyph_id = None;
     let mut json = false;
+    let mut list_tables = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -68,9 +69,10 @@ fn main() -> ExitCode {
                 };
             }
             "--json" => json = true,
+            "--tables" => list_tables = true,
             _ if path.is_none() => path = Some(arg),
             _ => {
-                eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--glyph ID] [--json] <font-file>");
+                eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--glyph ID] [--json] [--tables] <font-file>");
                 return ExitCode::FAILURE;
             }
         }
@@ -79,7 +81,7 @@ fn main() -> ExitCode {
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--glyph ID] [--json] <font-file>");
+            eprintln!("usage: fontmetrics [--index N] [--size SIZE] [--glyph ID] [--json] [--tables] <font-file>");
             return ExitCode::FAILURE;
         }
     };
@@ -105,7 +107,13 @@ fn main() -> ExitCode {
 
     let format = if json { OutputFormat::Json } else { OutputFormat::Text };
 
-    match build_report(&data, font_index, font_size, glyph_id, format) {
+    let result = if list_tables {
+        build_tables_report(&data, font_index, format)
+    } else {
+        build_report(&data, font_index, font_size, glyph_id, format)
+    };
+
+    match result {
         Ok(report) => {
             print!("{report}");
             ExitCode::SUCCESS
@@ -169,6 +177,40 @@ fn build_report(
         OutputFormat::Text => format_report(&head, &hhea, os2.as_ref(), font_size, glyph_advance, outline_format),
         OutputFormat::Json => format_json(&head, &hhea, os2.as_ref(), font_size, glyph_advance, outline_format),
     })
+}
+
+/// Lists every table tag in the font's sfnt directory, in the order they
+/// appear on disk. Unlike `build_report`, this doesn't require `head` or
+/// `hhea` to be present, so it also works as a quick sanity check on a font
+/// that's missing tables the rest of this tool needs.
+fn build_tables_report(data: &[u8], font_index: usize, format: OutputFormat) -> Result<String, ParseError> {
+    let directory = sfnt::parse_font(data, font_index)?;
+
+    Ok(match format {
+        OutputFormat::Text => format_tables_report(&directory),
+        OutputFormat::Json => format_tables_json(&directory),
+    })
+}
+
+fn format_tables_report(directory: &sfnt::TableDirectory) -> String {
+    let mut out = format!("tables ({}):\n", directory.records.len());
+    for record in &directory.records {
+        let tag = String::from_utf8_lossy(&record.tag);
+        out.push_str(&format!("  '{tag}'  {} bytes\n", record.length));
+    }
+    out
+}
+
+fn format_tables_json(directory: &sfnt::TableDirectory) -> String {
+    let entries: Vec<String> = directory
+        .records
+        .iter()
+        .map(|record| {
+            let tag = String::from_utf8_lossy(&record.tag).replace('\\', "\\\\").replace('"', "\\\"");
+            format!("{{ \"tag\": \"{tag}\", \"length\": {} }}", record.length)
+        })
+        .collect();
+    format!("{{\n  \"tables\": [\n    {}\n  ]\n}}\n", entries.join(",\n    "))
 }
 
 /// Scales a font-units value to the given point size: `value * size /
@@ -608,6 +650,39 @@ mod tests {
         let report = build_report(&data, 0, None, Some(1), OutputFormat::Json).unwrap();
 
         assert!(report.contains("\"glyph\": { \"id\": 1, \"advanceWidth\": 600 }"));
+    }
+
+    #[test]
+    fn lists_table_tags_present_in_a_font() {
+        let data = minimal_font();
+        let report = build_tables_report(&data, 0, OutputFormat::Text).unwrap();
+
+        assert!(report.contains("tables (2):"));
+        assert!(report.contains("'head'"));
+        assert!(report.contains("'hhea'"));
+    }
+
+    #[test]
+    fn lists_table_tags_without_requiring_head_or_hhea() {
+        // build_report would fail on this (no head table), but the table
+        // listing only needs the directory itself.
+        let mut data = vec![0u8; 12 + 16 + 4];
+        set_u32(&mut data, 0, 0x0001_0000);
+        set_u16(&mut data, 4, 1);
+        write_table_record(&mut data, 0, b"CFF ", 28, 4);
+
+        let report = build_tables_report(&data, 0, OutputFormat::Text).unwrap();
+        assert!(report.contains("tables (1):"));
+        assert!(report.contains("'CFF '"));
+    }
+
+    #[test]
+    fn lists_table_tags_as_json() {
+        let data = minimal_font();
+        let report = build_tables_report(&data, 0, OutputFormat::Json).unwrap();
+
+        assert!(report.contains("\"tag\": \"head\""));
+        assert!(report.contains("\"tag\": \"hhea\""));
     }
 
     #[test]

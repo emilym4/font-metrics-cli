@@ -108,6 +108,25 @@ This takes a raw glyph id, not a character - there's no cmap lookup here, so
 turning a character into a glyph id is left to another tool. The id must be
 less than the font's glyph count (from `maxp`); anything else is an error.
 
+Pass `--tables` to list every table tag in the font's sfnt directory instead
+of the metrics report:
+
+```
+$ fontmetrics --tables /System/Library/Fonts/Helvetica.ttc
+```
+
+```
+tables (12):
+  'cmap'  2556 bytes
+  'cvt '  144 bytes
+  'fpgm'  1146 bytes
+  ...
+```
+
+This only reads the table directory, so it works even on a font missing
+`head` or `hhea` - useful for checking what's actually in a file before
+reaching for the rest of this tool.
+
 Pass `-` as the font file to read the font bytes from stdin instead, so the
 tool can sit at the end of a pipeline:
 
