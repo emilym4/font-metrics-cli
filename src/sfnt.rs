@@ -32,6 +32,8 @@ pub enum ParseError {
     },
     FontIndexOutOfRange { index: usize, count: usize },
     GlyphIndexOutOfRange { index: u16, count: u16 },
+    NoUsableCmapSubtable,
+    CharacterNotMapped(char),
 }
 
 impl fmt::Display for ParseError {
@@ -51,6 +53,12 @@ impl fmt::Display for ParseError {
             }
             ParseError::GlyphIndexOutOfRange { index, count } => {
                 write!(f, "glyph {index} out of range: font contains {count} glyph(s)")
+            }
+            ParseError::NoUsableCmapSubtable => {
+                write!(f, "font's cmap table has no subtable this tool can read (needs format 0, 4, or 12)")
+            }
+            ParseError::CharacterNotMapped(ch) => {
+                write!(f, "character '{ch}' (U+{:04X}) has no glyph in this font's cmap table", *ch as u32)
             }
         }
     }

@@ -104,9 +104,26 @@ $ fontmetrics --glyph 40 /System/Library/Fonts/Helvetica.ttc
 glyph 40 advance: 556
 ```
 
-This takes a raw glyph id, not a character - there's no cmap lookup here, so
-turning a character into a glyph id is left to another tool. The id must be
-less than the font's glyph count (from `maxp`); anything else is an error.
+This takes a raw glyph id. The id must be less than the font's glyph count
+(from `maxp`); anything else is an error.
+
+Pass `--char` (or `-c`) with a single character instead, to look up its
+glyph id through the font's `cmap` table first:
+
+```
+$ fontmetrics --char A /System/Library/Fonts/Helvetica.ttc
+```
+
+```
+...
+glyph 36 ('A' U+0041) advance: 667
+```
+
+`--glyph` and `--char` can't be combined. If the font's `cmap` has no entry
+for the character, that's an error rather than a silent fallback. Lookups
+use whichever `cmap` subtable best covers Unicode - full-repertoire formats
+(needed for anything outside the Basic Multilingual Plane, like emoji) are
+preferred over BMP-only ones.
 
 Pass `--tables` to list every table tag in the font's sfnt directory instead
 of the metrics report:
@@ -144,6 +161,8 @@ starts with a table directory: a list of four-byte tags, each pointing at an
 offset and length elsewhere in the file. `src/sfnt.rs` parses that directory
 and slices out individual tables. `src/tables.rs` knows the byte layout of
 the specific tables this tool cares about and turns them into plain structs.
+`src/cmap.rs` handles the one table with a more involved internal structure:
+character-to-glyph mapping, used by `--char`.
 
 Every parsing function takes a byte slice and returns a value or an error —
 no file I/O, no globals, no hidden state. `src/main.rs` is the only place
@@ -174,11 +193,13 @@ win descent:      200
 
 ## Limitations (for now)
 
-- Per-glyph advance widths are readable with `--glyph`, but individual glyph
-  outlines (from `glyf` or `CFF `/`CFF2`) are out of scope; `outline format`
-  reports which outline table is present without parsing its contents.
-- There's no cmap support, so `--glyph` takes a raw glyph id rather than a
-  character.
+- Per-glyph advance widths are readable with `--glyph`/`--char`, but
+  individual glyph outlines (from `glyf` or `CFF `/`CFF2`) are out of scope;
+  `outline format` reports which outline table is present without parsing
+  its contents.
+- `cmap` lookups cover formats 0, 4, and 12, which is every font this tool
+  has been tried against. Formats 2, 6, 13, and 14 (used for some CJK
+  encodings and Unicode variation selectors) aren't implemented.
 
 ## License
 
