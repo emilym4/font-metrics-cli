@@ -34,6 +34,7 @@ pub enum ParseError {
     GlyphIndexOutOfRange { index: u16, count: u16 },
     NoUsableCmapSubtable,
     CharacterNotMapped(char),
+    Woff(String),
 }
 
 impl fmt::Display for ParseError {
@@ -59,6 +60,9 @@ impl fmt::Display for ParseError {
             }
             ParseError::CharacterNotMapped(ch) => {
                 write!(f, "character '{ch}' (U+{:04X}) has no glyph in this font's cmap table", *ch as u32)
+            }
+            ParseError::Woff(message) => {
+                write!(f, "invalid WOFF file: {message}")
             }
         }
     }

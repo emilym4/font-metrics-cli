@@ -151,8 +151,12 @@ tool can sit at the end of a pipeline:
 $ cat /System/Library/Fonts/Helvetica.ttc | fontmetrics -
 ```
 
-Whatever's upstream needs to hand over raw sfnt bytes, not a compressed
-`.woff`/`.woff2` container - this tool doesn't decompress those.
+A `.woff` file works the same as a plain `.ttf`/`.otf`, whether passed as a
+path or piped in over stdin - the tool notices the `wOFF` signature and
+decompresses the table directory itself before reading it. `.woff2` isn't
+supported: it compresses tables with Brotli instead of zlib, which is a much
+bigger format to implement from scratch, so for now it needs to be converted
+to `.ttf`/`.otf` (or `.woff`) first with something like `woff2_decompress`.
 
 ## How it works
 
@@ -162,7 +166,9 @@ offset and length elsewhere in the file. `src/sfnt.rs` parses that directory
 and slices out individual tables. `src/tables.rs` knows the byte layout of
 the specific tables this tool cares about and turns them into plain structs.
 `src/cmap.rs` handles the one table with a more involved internal structure:
-character-to-glyph mapping, used by `--char`.
+character-to-glyph mapping, used by `--char`. `src/woff.rs` reconstructs a
+plain sfnt file from a WOFF container, using `src/inflate.rs`'s DEFLATE
+decoder to undo the zlib compression on each table.
 
 Every parsing function takes a byte slice and returns a value or an error —
 no file I/O, no globals, no hidden state. `src/main.rs` is the only place
@@ -200,6 +206,8 @@ win descent:      200
 - `cmap` lookups cover formats 0, 4, and 12, which is every font this tool
   has been tried against. Formats 2, 6, 13, and 14 (used for some CJK
   encodings and Unicode variation selectors) aren't implemented.
+- `.woff` input is decompressed automatically; `.woff2` isn't, since it
+  uses Brotli rather than zlib for table compression.
 
 ## License
 

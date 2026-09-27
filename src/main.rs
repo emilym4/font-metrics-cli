@@ -4,8 +4,10 @@ use std::io::{self, Read};
 use std::process::ExitCode;
 
 mod cmap;
+mod inflate;
 mod sfnt;
 mod tables;
+mod woff;
 
 use sfnt::ParseError;
 use tables::{HeadTable, HheaTable, Os2Table};
@@ -127,6 +129,21 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    };
+
+    let data = if woff::is_woff(&data) {
+        match woff::to_sfnt(&data) {
+            Ok(sfnt_data) => sfnt_data,
+            Err(e) => {
+                eprintln!("fontmetrics: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if woff::is_woff2(&data) {
+        eprintln!("fontmetrics: WOFF2 input isn't supported yet (it uses Brotli, not zlib); decompress it to .ttf/.otf first");
+        return ExitCode::FAILURE;
+    } else {
+        data
     };
 
     let format = if json { OutputFormat::Json } else { OutputFormat::Text };
